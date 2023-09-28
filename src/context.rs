@@ -42,7 +42,7 @@ use crate::utils::{get_tokio_runtime, wait_for_future};
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::FileCompressionType;
+use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::MemTable;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::{SessionConfig, SessionContext, TaskContext};

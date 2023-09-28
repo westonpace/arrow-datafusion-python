@@ -15,22 +15,34 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::sync::Arc;
+
+use datafusion_common::arrow::datatypes::Schema;
+use datafusion_common::{DFSchema, DFSchemaRef};
 use pyo3::{prelude::*, types::PyBytes};
 
 use crate::context::PySessionContext;
 use crate::errors::{py_datafusion_err, DataFusionError};
+use crate::expr::PyExpr as PyDfExpr;
 use crate::sql::logical::PyLogicalPlan;
 use crate::utils::wait_for_future;
 
+use datafusion_common::arrow::pyarrow::PyArrowType;
 use datafusion_substrait::logical_plan::{consumer, producer};
 use datafusion_substrait::serializer;
-use datafusion_substrait::substrait::proto::Plan;
+use datafusion_substrait::substrait::proto::{ExtendedExpression, Plan};
 use prost::Message;
 
 #[pyclass(name = "plan", module = "datafusion.substrait", subclass)]
 #[derive(Debug, Clone)]
 pub(crate) struct PyPlan {
     pub(crate) plan: Plan,
+}
+
+#[pyclass(name = "expression", module = "datafusion.substrait", subclass)]
+#[derive(Debug, Clone)]
+pub(crate) struct PyExpr {
+    pub(crate) expr: ExtendedExpression,
 }
 
 #[pymethods]
@@ -91,6 +103,39 @@ impl PySubstraitSerializer {
     }
 
     #[staticmethod]
+    pub fn serialize_sqlexpr_bytes(
+        sql: &str,
+        schema: &PyAny,
+        ctx: PySessionContext,
+        py: Python,
+    ) -> PyResult<PyObject> {
+        let schema = PyArrowType::<Schema>::extract(schema)?;
+        let schema: DFSchema = schema.0.try_into()?;
+        let schema: DFSchemaRef = Arc::new(schema);
+        let proto_bytes: Vec<u8> = wait_for_future(
+            py,
+            serializer::serialize_exexpr_bytes(sql, &schema, &ctx.ctx),
+        )
+        .map_err(DataFusionError::from)?;
+        Ok(PyBytes::new(py, &proto_bytes).into())
+    }
+
+    #[staticmethod]
+    pub fn serialize_dfexpr_bytes(
+        expr: PyDfExpr,
+        schema: &PyAny,
+        py: Python,
+    ) -> PyResult<PyObject> {
+        let schema = PyArrowType::<Schema>::extract(schema)?;
+        let schema: DFSchema = schema.0.try_into()?;
+        let schema: DFSchemaRef = Arc::new(schema);
+        let proto_bytes: Vec<u8> =
+            wait_for_future(py, serializer::serialize_dfexpr_bytes(expr.expr, &schema))
+                .map_err(DataFusionError::from)?;
+        Ok(PyBytes::new(py, &proto_bytes).into())
+    }
+
+    #[staticmethod]
     pub fn deserialize(path: &str, py: Python) -> PyResult<PyPlan> {
         let plan =
             wait_for_future(py, serializer::deserialize(path)).map_err(DataFusionError::from)?;
@@ -102,6 +147,13 @@ impl PySubstraitSerializer {
         let plan = wait_for_future(py, serializer::deserialize_bytes(proto_bytes))
             .map_err(DataFusionError::from)?;
         Ok(PyPlan { plan: *plan })
+    }
+
+    #[staticmethod]
+    pub fn deserialize_expr_bytes(proto_bytes: Vec<u8>, py: Python) -> PyResult<PyExpr> {
+        let expr = wait_for_future(py, serializer::deserialize_exexpr_bytes(proto_bytes))
+            .map_err(DataFusionError::from)?;
+        Ok(PyExpr { expr: *expr })
     }
 }
 
@@ -118,6 +170,21 @@ impl PySubstraitProducer {
             Ok(plan) => Ok(PyPlan { plan: *plan }),
             Err(e) => Err(py_datafusion_err(e)),
         }
+    }
+
+    #[staticmethod]
+    pub fn to_substrait_expr(expr: PyDfExpr, schema: &PyAny) -> PyResult<PyExpr> {
+        let schema = PyArrowType::<Schema>::extract(schema)?;
+        let schema: DFSchema = schema.0.try_into()?;
+        let schema: DFSchemaRef = Arc::new(schema);
+        let exexpr = producer::to_substrait_extended_expression_single(
+            expr.expr,
+            "datafusion_expression".to_owned(),
+            &schema,
+        )
+        .map_err(DataFusionError::from)?;
+        dbg!(&exexpr);
+        Ok(PyExpr { expr: *exexpr })
     }
 }
 
@@ -137,6 +204,16 @@ impl PySubstraitConsumer {
         let result = consumer::from_substrait_plan(&mut ctx.ctx, &plan.plan);
         let logical_plan = wait_for_future(py, result).map_err(DataFusionError::from)?;
         Ok(PyLogicalPlan::new(logical_plan))
+    }
+
+    /// Convert Substrait ExtendedExpression to DataFusion Expr
+    #[staticmethod]
+    pub fn from_substrait_expr(expr: PyExpr, py: Python) -> PyResult<PyDfExpr> {
+        let result = consumer::from_substrait_extended_expr_single(&expr.expr);
+        let (expr, _) = wait_for_future(py, result).map_err(DataFusionError::from)?;
+        Ok(PyDfExpr {
+            expr: expr.as_ref().clone(),
+        })
     }
 }
 
